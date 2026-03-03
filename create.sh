@@ -2,7 +2,7 @@
 # linux-rescue/mkimage/create.sh
 
 # Required packages:
-# base libisoburn syslinux arch-install-scripts squashfs-tools mtools
+# base libisoburn syslinux arch-install-scripts squashfs-tools mtools dosfstools coreutils
 ROOTFS_PACKAGES="archlinux-keyring file gcc-libs util-linux xz ncurses glibc iproute2 procps-ng iputils filesystem systemd systemd-sysvcompat util-linux kmod coreutils linux mkinitcpio bash iwd"  # Python, firmware and much more later...
 
 
@@ -68,26 +68,20 @@ cp -rv "${SRC_DIR}/iso/." "${IMG_DIR}/" | tee -a "${BUILD_LOG}"
 
 
 # systemd-boot
-if [ -f "/usr/lib/systemd/boot/efi/systemd-bootx64.efi" ]; then
-	EFI_STUB="/usr/lib/systemd/boot/efi/systemd-bootx64.efi"
-else
-	# Download and extract...
-	blog "Downloading systemd package"
-	blog "Extracting systemd"
-	EFI_STUB="..."
-fi
-
-cp -v "${EFI_STUB}" "${IMG_DIR}/EFI/BOOT/BOOTX64.EFI" | tee -a "${BUILD_LOG}"
+cp -v "/usr/lib/systemd/boot/efi/systemd-bootx64.efi" "${IMG_DIR}/EFI/BOOT/BOOTX64.EFI" | tee -a "${BUILD_LOG}"
 
 
 # syslinux files
-cp -v /usr/lib/syslinux/bios/{isolinux.bin,ldlinux.c32} "${IMG_DIR}/isolinux/" | tee -a "${BUILD_LOG}"
+cp -v /usr/lib/syslinux/bios/{isolinux.bin,ldlinux.c32,isohdpfx.bin} "${IMG_DIR}/isolinux/" | tee -a "${BUILD_LOG}"
 
 # Preinstall some config files and directories:
 cp -rv "${SRC_DIR}/etc" "${ROOTFS_DIR}/" | tee -a "${BUILD_LOG}"
 
+mkdir -p "${ROOTFS_DIR}/etc/systemd/system/initrd-root-fs.target.wants"
+ln -sf ../initrd-lrescue-root.service "${ROOTFS_DIR}/etc/systemd/system/initrd-root-fs.target.wants/initrd-lrescue-root.service"
 
-pacstrap "${ROOTFS_DIR}" $ROOTFS_PACKAGES
+pacstrap -cM "${ROOTFS_DIR}" $ROOTFS_PACKAGES
+
 blog "Clean caches after pacstrap."
 rm -rf \
 	"${ROOTFS_DIR}/var/cache/pacman/pkg" \
@@ -105,8 +99,40 @@ blog "Compressing rootfs into squashfs file..."
 mksquashfs "${ROOTFS_DIR}" "${ROOTFS_FILE}" -comp xz -no-progress 2>&1 | tee -a "${BUILD_LOG}"
 
 
+blog "Creating efiboot.img..."
+EFIBOOT_IMG="${IMG_DIR}/efiboot.img"
+dd if=/dev/zero "of=${EFIBOOT_IMG}" bs=1M count=50 2>&1 | tee -a "${BUILD_LOG}"
 
-xorriso -as mkisofs 
+blog "Creating efiboot.img file system..."
+mkfs.fat -F32 -n LRESCUE_EFI "${EFIBOOT_IMG}" 2>&1 | tee -a "${BUILD_LOG}"
+
+blog "Creating efiboot.img directories..."
+mmd -i "${EFIBOOT_IMG}" ::/EFI 2>&1 | tee -a "${BUILD_LOG}"
+mmd -i "${EFIBOOT_IMG}" ::/EFI/BOOT 2>&1 | tee -a "${BUILD_LOG}"
+mmd -i "${EFIBOOT_IMG}" ::/loader 2>&1 | tee -a "${BUILD_LOG}"
+mmd -i "${EFIBOOT_IMG}" ::/loader/entries 2>&1 | tee -a "${BUILD_LOG}"
+
+blog "Add efiboot.img files..."
+mcopy -i "${EFIBOOT_IMG}" "${IMG_DIR}/EFI/BOOT/BOOTX64.EFI" ::/EFI/BOOT/ 2>&1 | tee -a "${BUILD_LOG}"
+mcopy -i "${EFIBOOT_IMG}" "${IMG_DIR}/EFI/BOOT/loader/loader.conf" ::/loader/ 2>&1 | tee -a "${BUILD_LOG}"
+mcopy -i "${EFIBOOT_IMG}" "${IMG_DIR}/EFI/BOOT/loader/entries/lrescue.conf" ::/loader/entries/ 2>&1 | tee -a "${BUILD_LOG}"
 
 
-xorriso -e efiboot.img -isohybrid-gpt-basdat
+blog "Compose ISO image..."
+xorriso -as mkisofs \
+  -iso-level 3 \
+  -V LRESCUEISO \
+  -o "${ISO_FILE}" \
+  -isohybrid-mbr /usr/lib/syslinux/bios/isohdpfx.bin \
+  -c isolinux/boot.cat \
+  -b isolinux/isolinux.bin \
+    -no-emul-boot \
+    -boot-load-size 4 \
+    -boot-info-table \
+  -eltorito-alt-boot \
+  -e efiboot.img \
+    -no-emul-boot \
+  -isohybrid-gpt-basdat \
+  "${IMG_DIR}" 2>&1 | tee -a "${BUILD_LOG}"
+
+blog "Image ${IMG_DIR} ready."
