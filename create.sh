@@ -3,7 +3,7 @@
 
 # Required packages:
 # base libisoburn syslinux arch-install-scripts squashfs-tools mtools dosfstools coreutils
-ROOTFS_PACKAGES="archlinux-keyring file gcc-libs util-linux xz ncurses glibc iproute2 procps-ng iputils filesystem systemd systemd-sysvcompat util-linux kmod coreutils linux mkinitcpio bash iwd"  # Python, firmware and much more later...
+ROOTFS_PACKAGES="archlinux-keyring file gcc-libs util-linux xz ncurses glibc iproute2 procps-ng iputils filesystem systemd systemd-sysvcompat util-linux kmod coreutils linux mkinitcpio bash iwd iptables linux-firmware"  # Python, firmware and much more later...
 
 
 # Empty directory for the bootable image (Hybrid ISO root) (recreate)
@@ -47,40 +47,34 @@ ROOTFS_FILE="${IMG_DIR}/rootfs.squashfs"
 # Final hybrid ISO image for distribution.
 ISO_FILE=./lrescue.iso
 
-
-# Temp directory (recreate)
-TMP_DIR=./temp
-blog "Create/clean ${TMP_DIR}"
-[ ! -d "${TMP_DIR}" ] || rm -rf "${TMP_DIR}"
-mkdir -p "${TMP_DIR}"
-
-
 # Cache directory for downloads etc. (create, keep)
 CACHE_DIR=./cache
 blog "Create/keep CACHE_DIR: ${CACHE_DIR}"
 mkdir -p "${CACHE_DIR}"
 
-
-
-
 blog "Copy static source files to image..."
 cp -rv "${SRC_DIR}/iso/." "${IMG_DIR}/" | tee -a "${BUILD_LOG}"
 
-
 # systemd-boot
 cp -v "/usr/lib/systemd/boot/efi/systemd-bootx64.efi" "${IMG_DIR}/EFI/BOOT/BOOTX64.EFI" | tee -a "${BUILD_LOG}"
-
 
 # syslinux files
 cp -v /usr/lib/syslinux/bios/{isolinux.bin,ldlinux.c32,isohdpfx.bin} "${IMG_DIR}/isolinux/" | tee -a "${BUILD_LOG}"
 
 # Preinstall some config files and directories:
-cp -rv "${SRC_DIR}/etc" "${ROOTFS_DIR}/" | tee -a "${BUILD_LOG}"
+cp -rv "${SRC_DIR}/etc" "${ROOTFS_DIR}/" 2>&1 | tee -a "${BUILD_LOG}"
 
+# Setup and enable switch-root service
 mkdir -p "${ROOTFS_DIR}/etc/systemd/system/initrd-root-fs.target.wants"
 ln -sf ../initrd-lrescue-root.service "${ROOTFS_DIR}/etc/systemd/system/initrd-root-fs.target.wants/initrd-lrescue-root.service"
 
-pacstrap -cM "${ROOTFS_DIR}" $ROOTFS_PACKAGES
+# Temp fix
+mkdir -p "${ROOTFS_DIR}/etc/"
+cp /etc/{passwd,shadow} "${ROOTFS_DIR}/etc/"
+
+blog "Installing minimal system."
+# Will run mkinitcpio
+pacstrap -cM "${ROOTFS_DIR}" $ROOTFS_PACKAGES 2>&1 | tee -a "${BUILD_LOG}"
 
 blog "Clean caches after pacstrap."
 rm -rf \
@@ -91,8 +85,11 @@ rm -rf \
 	"${ROOTFS_DIR}/usr/share/info"
 
 
-# Move kernel and initramfs into ISO root.
+blog "Move kernel and initramfs into ISO root..."
 mv ${ROOTFS_DIR}/boot/* ${IMG_DIR}/boot/
+
+# Modify rootfs root passwd
+arch-chroot "${ROOTFS_DIR}" passwd -d root
 
 # Create rootfs
 blog "Compressing rootfs into squashfs file..."
@@ -106,24 +103,31 @@ dd if=/dev/zero "of=${EFIBOOT_IMG}" bs=1M count=50 2>&1 | tee -a "${BUILD_LOG}"
 blog "Creating efiboot.img file system..."
 mkfs.fat -F32 -n LRESCUE_EFI "${EFIBOOT_IMG}" 2>&1 | tee -a "${BUILD_LOG}"
 
+
 blog "Creating efiboot.img directories..."
 mmd -i "${EFIBOOT_IMG}" ::/EFI 2>&1 | tee -a "${BUILD_LOG}"
 mmd -i "${EFIBOOT_IMG}" ::/EFI/BOOT 2>&1 | tee -a "${BUILD_LOG}"
 mmd -i "${EFIBOOT_IMG}" ::/loader 2>&1 | tee -a "${BUILD_LOG}"
 mmd -i "${EFIBOOT_IMG}" ::/loader/entries 2>&1 | tee -a "${BUILD_LOG}"
+mmd -i "${EFIBOOT_IMG}" ::/boot 2>&1 | tee -a "${BUILD_LOG}"
 
 blog "Add efiboot.img files..."
 mcopy -i "${EFIBOOT_IMG}" "${IMG_DIR}/EFI/BOOT/BOOTX64.EFI" ::/EFI/BOOT/ 2>&1 | tee -a "${BUILD_LOG}"
 mcopy -i "${EFIBOOT_IMG}" "${IMG_DIR}/EFI/BOOT/loader/loader.conf" ::/loader/ 2>&1 | tee -a "${BUILD_LOG}"
 mcopy -i "${EFIBOOT_IMG}" "${IMG_DIR}/EFI/BOOT/loader/entries/lrescue.conf" ::/loader/entries/ 2>&1 | tee -a "${BUILD_LOG}"
 
+# Copy kernel stuff too because efiboot.img is an isolated container and the entries can't access the ISO9660 tree.
+mcopy -i "${EFIBOOT_IMG}" "${IMG_DIR}/boot/initramfs-linux.img" ::/boot/ 2>&1 | tee -a "${BUILD_LOG}"
+mcopy -i "${EFIBOOT_IMG}" "${IMG_DIR}/boot/vmlinuz-linux" ::/boot/ 2>&1 | tee -a "${BUILD_LOG}"
 
-blog "Compose ISO image..."
+
+blog "Compose ISO image..." # Don't touch build_log file. Don't change IMG_DIR at all.
 xorriso -as mkisofs \
   -iso-level 3 \
   -V LRESCUEISO \
   -o "${ISO_FILE}" \
   -isohybrid-mbr /usr/lib/syslinux/bios/isohdpfx.bin \
+  -partition_offset 16 \
   -c isolinux/boot.cat \
   -b isolinux/isolinux.bin \
     -no-emul-boot \
@@ -133,6 +137,6 @@ xorriso -as mkisofs \
   -e efiboot.img \
     -no-emul-boot \
   -isohybrid-gpt-basdat \
-  "${IMG_DIR}" 2>&1 | tee -a "${BUILD_LOG}"
+  "${IMG_DIR}"
 
-blog "Image ${IMG_DIR} ready."
+echo "==> Image ${IMG_DIR} ready."

@@ -3,12 +3,12 @@ Description=Switch root to LRESCUEISO
 DefaultDependencies=no
 Before=initrd-root-fs.target initrd-switch-root.target
 Wants=initrd-root-device.target
-After=dev-disk-by\x2dlabel-LRESCUEISO.device
+# After=dev-disk-by\x2dlabel-LRESCUEISO.device
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -exc "mkdir -p /run/lrescue/iso /sysroot && mount -t iso9660 -o ro /dev/disk/by-label/LRESCUEISO /run/lrescue/iso && mount -t squashfs -o ro,loop /run/lrescue/iso/rootfs.squashfs /sysroot"
+ExecStart=/usr/bin/busybox sh -c "mkdir -p /run/lrescue/iso /sysroot && mount -t iso9660 -o ro /dev/sr0 /run/lrescue/iso && mount -t squashfs -o ro,loop /run/lrescue/iso/rootfs.squashfs /sysroot"
 
 [Install]
 WantedBy=initrd-root-fs.target
